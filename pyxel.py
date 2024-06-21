@@ -1,37 +1,74 @@
-from js import (
-    document,
-    Element,
-)
+from js import document, navigator
 from pyodide.ffi.wrappers import add_event_listener
+import asyncio
+import numpy as np
+import posenet  # 假設我們有一個名為 posenet 的模組
 
+# 設置全局變數
 ctx = None
 canvas_width = 0
 canvas_height = 0
 frame_count = 0
-imageBank = [] # image bank of max length 3
-loadedImages = 0
-loading = True
-
-_scale = 1
 
 KEY_LEFT = 37
 KEY_UP = 38
 KEY_RIGHT = 39
 KEY_DOWN = 40
-
-KEY_B = 66
-
 KEY_SPACE = 32
 
 _pressedKeys = {
-    KEY_LEFT: False, 
-    KEY_UP: False, 
-    KEY_RIGHT: False, 
+    KEY_LEFT: False,
+    KEY_UP: False,
+    KEY_RIGHT: False,
     KEY_DOWN: False,
-    KEY_B: False,
-    KEY_SPACE: False
+    KEY_SPACE: False,
 }
 
+# 設置視頻元素
+video_element = document.createElement("video")
+video_element.style.display = "none"  # 隱藏視頻元素
+document.body.appendChild(video_element)
+
+
+# 初始化攝像頭
+async def setup_camera():
+    stream = await navigator.mediaDevices.getUserMedia({"video": True})
+    video_element.srcObject = stream
+    await video_element.play()
+
+
+# 捕捉當前幀
+def capture_frame():
+    ctx.drawImage(video_element, 0, 0, canvas_width, canvas_height)
+
+
+# 初始化畫布和攝像頭
+def init(width: int, height: int, canvas, scale: int = 1):
+    global ctx, canvas_width, canvas_height
+    ctx = canvas.getContext("2d", {"alpha": False})
+
+    ctx.mozImageSmoothingEnabled = False
+    ctx.webkitImageSmoothingEnabled = False
+    ctx.msImageSmoothingEnabled = False
+    ctx.imageSmoothingEnabled = False
+
+    canvas.style.width = f"{width * scale}px"
+    canvas.style.height = f"{height * scale}px"
+    canvas.width = width * scale
+    canvas.height = height * scale
+
+    canvas_width = width * scale
+    canvas_height = height * scale
+
+    asyncio.ensure_future(setup_camera())  # 開始攝像頭
+
+    ctx.clearRect(0, 0, width * scale, height * scale)
+
+    add_event_listener(document, "keydown", _handle_input)
+    add_event_listener(document, "keyup", _handle_input)
+
+
+# 處理鍵盤事件
 def _handle_input(e):
     global _pressedKeys
     if e.type == "keydown":
@@ -39,118 +76,80 @@ def _handle_input(e):
     elif e.type == "keyup":
         _pressedKeys[e.keyCode] = False
 
-def init(width: int, height: int, canvas: Element, scale: int = 1,):
-    global ctx
-    ctx = canvas.getContext("2d", {'alpha': False})
 
-    ctx.mozImageSmoothingEnabled = False
-    ctx.webkitImageSmoothingEnabled = False
-    ctx.msImageSmoothingEnabled = False
-    ctx.imageSmoothingEnabled = False
+# 加載 PoseNet 模型
+posenet_model = None
 
-    canvas.style.width = f"{width*scale}px"
-    canvas.style.height = f"{height*scale}px"
 
-    canvas.width = width*scale
-    canvas.height = height*scale
+async def load_posenet_model():
+    global posenet_model
+    if not posenet_model:
+        posenet_model = await posenet.load()
+    return posenet_model
 
-    global canvas_width
-    canvas_width = width*scale
-    global canvas_height
-    canvas_height = height*scale
 
-    global _scale
-    _scale = scale
+# 檢測姿勢
+async def detect_pose():
+    global posenet_model
+    if not posenet_model:
+        posenet_model = await load_posenet_model()
 
-    ctx.clearRect(0, 0, width*scale, height*scale)
+    # 捕捉當前幀
+    capture_frame()
 
-     #init input
-    add_event_listener(
-        document,
-        "keydown",
-        _handle_input
+    # 轉換幀為數據
+    input_image = np.zeros((canvas_height, canvas_width, 3), dtype=np.uint8)
+    ctx.getImageData(0, 0, canvas_width, canvas_height).data = (
+        input_image.flatten().tolist()
     )
 
-    add_event_listener(
-        document,
-        "keyup",
-        _handle_input
+    # 估計姿勢
+    pose = await posenet_model.estimate_single_pose(
+        input_image, {"flipHorizontal": False}
     )
 
+    # 分析姿勢並設置鍵盤按鍵狀態
+    for keypoint in pose["keypoints"]:
+        if keypoint["score"] < 0.5:
+            continue
+        position = keypoint["position"]
+
+        # 將關鍵點映射到按鍵
+        if keypoint["part"] == "nose" and position["y"] < canvas_height * 0.3:
+            _pressedKeys[KEY_UP] = True
+        else:
+            _pressedKeys[KEY_UP] = False
+
+        if keypoint["part"] == "nose" and position["y"] > canvas_height * 0.7:
+            _pressedKeys[KEY_DOWN] = True
+        else:
+            _pressedKeys[KEY_DOWN] = False
+
+        if keypoint["part"] == "leftWrist" and position["x"] < canvas_width * 0.3:
+            _pressedKeys[KEY_LEFT] = True
+        else:
+            _pressedKeys[KEY_LEFT] = False
+
+        if keypoint["part"] == "rightWrist" and position["x"] > canvas_width * 0.7:
+            _pressedKeys[KEY_RIGHT] = True
+        else:
+            _pressedKeys[KEY_RIGHT] = False
+
+        if (
+            keypoint["part"] in ["leftWrist", "rightWrist"]
+            and position["y"] < canvas_height * 0.3
+        ):
+            _pressedKeys[KEY_SPACE] = True
+        else:
+            _pressedKeys[KEY_SPACE] = False
 
 
-# inputs
-def btn(key: int):
-    return _pressedKeys[key]
-    
-def handle_image_load(e):
-    global loadedImages
-    loadedImages += 1
-
-def load_assets(assets: list):
-    global imageBank
-    for imageSrc in assets:
-        image = document.createElement('img')
-        image.src = imageSrc
-        
-        add_event_listener(image, "load", handle_image_load)
-        imageBank.append(image)
-
+# 更新函數，用於每一幀調用
 def update():
     global frame_count
     frame_count += 1
-    global loading
-    if loadedImages >= 3:
-        loading = False
-
-def cls(col=0):
-    ctx.clearRect(0, 0, canvas_width, canvas_height)
-
-def blt(x, y, image_bank: int, _x, _y, width, height, transparent_col=0):
-    if loading:
-        return
-    #x, y refer to the position on the screen to draw
-    #_x, _y refer to the position of the image in the image bank
-
-    #in javascript:
-    #ctx.drawImage(image, sourceX, sourceY, sWidth, sHeight, destinationX, destinationY, dWidth, dHeight)
-    ctx.save()
-
-    if (width < 0) and (height < 0):
-        #flip horizontally and vertically
-        ctx.scale(-1, -1)
-        ctx.drawImage(imageBank[image_bank], _x, _y, -width, -height, -x * _scale, -y * _scale, width*_scale, height*_scale)
-
-    elif width < 0:
-        #flip horizontally
-        ctx.scale(-1, 1)
-        ctx.drawImage(imageBank[image_bank], _x, _y, -width, height, -x * _scale, y * _scale, width*_scale, height*_scale)
-
-    elif height < 0:
-        #flip vertically
-        ctx.scale(1, -1)
-        ctx.drawImage(imageBank[image_bank], _x, _y, width, -height, x * _scale, -y * _scale, width*_scale, height*_scale)
-    
-    else:
-        ctx.drawImage(imageBank[image_bank], _x, _y, width, height, x * _scale, y * _scale, width*_scale, height*_scale)
-
-    ctx.restore()
+    asyncio.ensure_future(detect_pose())  # 更新姿勢檢測
 
 
-def text(x, y, text: str, color):
-    ctx.font = "11px Monospace"
-    ctx.textAlign = 'left'
-    if(color == 7):
-        ctx.fillStyle = '#fff'
-
-    ctx.fillText(text, x*_scale, y*_scale)
-
-def centered_text(text: str, color):
-    if color == 7:
-        ctx.fillStyle = '#fff'
-
-    ctx.textAlign = 'center'
-    ctx.fillText(text, (canvas_width*_scale) / 2, (canvas_height*_scale) / 2)
-
-def quit():
-    pass
+# 設置初始化
+init(640, 480, document.querySelector("#myCanvas"), 1)
